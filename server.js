@@ -1,329 +1,219 @@
 const express = require('express');
-const cors = require('cors');
 const http = require('http');
+const path = require('path');
 const { Server } = require('socket.io');
-require('dotenv').config();
+const cors = require('cors');
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const { v4: uuidv4 } = require('uuid');
+
+try { require('dotenv').config(); } catch {}
 
 const app = express();
 const server = http.createServer(app);
+
+const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret-change-in-production';
+const PORT = process.env.PORT || 3001;
+const IS_PROD = !!(process.env.RAILWAY_ENVIRONMENT || process.env.NODE_ENV === 'production');
+
 const io = new Server(server, {
-  cors: {
-    origin: "*",
-    methods: ["GET", "POST", "PATCH", "DELETE"]
-  }
+  cors: { origin: '*', methods: ['GET', 'POST', 'PATCH', 'DELETE'] },
 });
 
-// Middleware
-app.use(cors());
+app.use(cors({ origin: '*' }));
 app.use(express.json());
 
-// In-memory data store (simulating MongoDB)
+// ─── Serve built React frontend ───────────────────────────────────────────────
+const FRONTEND_DIST = path.join(__dirname, 'frontend', 'dist');
+app.use(express.static(FRONTEND_DIST));
+
+// ─── In-Memory Database ───────────────────────────────────────────────────────
 const db = {
-  users: new Map(),
-  tasks: new Map(),
-  events: new Map(),
-  notifications: new Map()
+  users: [],
+  events: [],
+  tasks: [],
+  notifications: [],
 };
 
-// ID generators
-let userIdCounter = 1;
-let taskIdCounter = 1;
-let eventIdCounter = 1;
-let notificationIdCounter = 1;
-
-// Socket.io user mapping
 const userSockets = new Map();
 
-io.on('connection', (socket) => {
-  console.log('Client connected:', socket.id);
+// ─── Auth Middleware ──────────────────────────────────────────────────────────
+function authMiddleware(req, res, next) {
+  const auth = req.headers.authorization;
+  if (!auth || !auth.startsWith('Bearer ')) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    req.userId = jwt.verify(auth.split(' ')[1], JWT_SECRET).userId;
+    next();
+  } catch {
+    return res.status(401).json({ error: 'Invalid token' });
+  }
+}
 
-  socket.on('register', (userId) => {
-    userSockets.set(userId, socket.id);
-    console.log(`User ${userId} registered to socket ${socket.id}`);
-  });
+function pushNotification(userId, notification) {
+  db.notifications.push(notification);
+  const socketId = userSockets.get(userId);
+  if (socketId) io.to(socketId).emit('new-notification', notification);
+}
 
-  socket.on('urgent-request', async (data) => {
-    const { targetUserId, fromName, message } = data;
-    const notification = {
-      _id: String(notificationIdCounter++),
-      userId: targetUserId,
-      type: 'urgent',
-      from: fromName,
-      message,
-      read: false,
-      createdAt: new Date()
-    };
-    db.notifications.set(notification._id, notification);
-
-    const targetSocket = userSockets.get(targetUserId);
-    if (targetSocket) {
-      io.to(targetSocket).emit('new-notification', notification);
-    }
-  });
-
-  socket.on('disconnect', () => {
-    for (let [userId, socketId] of userSockets.entries()) {
-      if (socketId === socket.id) {
-        userSockets.delete(userId);
-        break;
-      }
-    }
-  });
-});
-
-// ============ AUTH ROUTES ============
-
-app.post('/api/register', (req, res) => {
+// ─── Auth ─────────────────────────────────────────────────────────────────────
+app.post('/api/register', async (req, res) => {
   const { username, password, displayName } = req.body;
-  
-  for (let user of db.users.values()) {
-    if (user.username === username) {
-      return res.status(400).json({ error: 'Username exists' });
-    }
-  }
-
-  const user = {
-    _id: String(userIdCounter++),
-    username,
-    password,
-    displayName: displayName || username,
-    allowExternalTasks: true,
-    allowUrgentContact: true,
-    calendarColor: '#3b82f6',
-    createdAt: new Date()
-  };
-  
-  db.users.set(user._id, user);
-  res.json({ userId: user._id, username, displayName: user.displayName });
+  if (!username || !password || !displayName)
+    return res.status(400).json({ error: 'All fields required' });
+  if (db.users.find((u) => u.username === username.toLowerCase()))
+    return res.status(409).json({ error: 'Username already taken' });
+  const passwordHash = await bcrypt.hash(password, 10);
+  const user = { id: uuidv4(), username: username.toLowerCase(), passwordHash, displayName, createdAt: new Date().toISOString() };
+  db.users.push(user);
+  const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: '7d' });
+  res.status(201).json({ token, user: { id: user.id, username: user.username, displayName: user.displayName } });
 });
 
-app.post('/api/login', (req, res) => {
+app.post('/api/login', async (req, res) => {
   const { username, password } = req.body;
-  
-  for (let user of db.users.values()) {
-    if (user.username === username && user.password === password) {
-      return res.json({ userId: user._id, username, displayName: user.displayName });
-    }
-  }
-  
-  res.status(401).json({ error: 'Invalid credentials' });
+  const user = db.users.find((u) => u.username === username?.toLowerCase());
+  if (!user || !(await bcrypt.compare(password, user.passwordHash)))
+    return res.status(401).json({ error: 'Invalid credentials' });
+  const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: '7d' });
+  res.json({ token, user: { id: user.id, username: user.username, displayName: user.displayName } });
 });
 
-// ============ CALENDAR ROUTES ============
+app.get('/api/me', authMiddleware, (req, res) => {
+  const user = db.users.find((u) => u.id === req.userId);
+  if (!user) return res.status(404).json({ error: 'Not found' });
+  res.json({ id: user.id, username: user.username, displayName: user.displayName });
+});
 
-app.get('/api/calendar/:userId', (req, res) => {
-  const { userId } = req.params;
-  const { start, end } = req.query;
+// ─── Public Profile ───────────────────────────────────────────────────────────
+app.get('/api/public/:username', (req, res) => {
+  const user = db.users.find((u) => u.username === req.params.username.toLowerCase());
+  if (!user) return res.status(404).json({ error: 'User not found' });
 
-  const userEvents = [];
-  for (let event of db.events.values()) {
-    if (event.userId === userId && event.isPublic) {
-      const eventStart = new Date(event.startTime);
-      const queryStart = start ? new Date(start) : new Date(0);
-      const queryEnd = end ? new Date(end) : new Date(8640000000000000);
-      
-      if (eventStart >= queryStart && eventStart <= queryEnd) {
-        userEvents.push(event);
-      }
-    }
-  }
-
-  const busySlots = userEvents.map(e => ({
-    start: e.startTime,
-    end: e.endTime,
-    title: e.title,
-    status: e.status
-  }));
+  const now = new Date();
+  const weekOut = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+  const publicEvents = db.events.filter(
+    (e) => e.userId === user.id && e.isPublic && new Date(e.start) <= weekOut && new Date(e.end) >= now
+  );
+  const currentEvent = publicEvents.find((e) => new Date(e.start) <= now && new Date(e.end) >= now) || null;
 
   res.json({
-    userId,
-    availability: busySlots,
-    timezone: 'UTC'
+    user: { id: user.id, username: user.username, displayName: user.displayName },
+    status: currentEvent ? currentEvent.type : 'available',
+    currentEvent,
+    upcomingEvents: publicEvents.sort((a, b) => new Date(a.start) - new Date(b.start)),
   });
 });
 
-app.post('/api/events', (req, res) => {
-  const { userId, title, startTime, endTime, status, isPublic } = req.body;
-  
-  const event = {
-    _id: String(eventIdCounter++),
-    userId,
-    title,
-    startTime: new Date(startTime),
-    endTime: new Date(endTime),
-    status: status || 'busy',
-    isPublic: isPublic !== false,
-    createdAt: new Date()
-  };
-  
-  db.events.set(event._id, event);
-  res.json(event);
+// ─── Calendar Events ──────────────────────────────────────────────────────────
+app.get('/api/calendar/:userId', (req, res) => {
+  const isOwner = (() => {
+    try {
+      const auth = req.headers.authorization;
+      if (!auth) return false;
+      return jwt.verify(auth.split(' ')[1], JWT_SECRET).userId === req.params.userId;
+    } catch { return false; }
+  })();
+  res.json(db.events.filter((e) => e.userId === req.params.userId && (isOwner || e.isPublic)));
 });
 
-app.get('/api/events/:userId', (req, res) => {
-  const { userId } = req.params;
-  const userEvents = [];
-  
-  for (let event of db.events.values()) {
-    if (event.userId === userId) {
-      userEvents.push(event);
-    }
-  }
-  
-  res.json(userEvents.sort((a, b) => new Date(a.startTime) - new Date(b.startTime)));
+app.post('/api/events', authMiddleware, (req, res) => {
+  const { title, start, end, type, isPublic } = req.body;
+  if (!title || !start || !end) return res.status(400).json({ error: 'title, start, end required' });
+  const colorMap = { busy: '#ef4444', meeting: '#f97316', focus: '#8b5cf6', break: '#22c55e' };
+  const event = { id: uuidv4(), userId: req.userId, title, start, end, type: type || 'busy', isPublic: isPublic !== false, color: colorMap[type] || '#64748b', createdAt: new Date().toISOString() };
+  db.events.push(event);
+  res.status(201).json(event);
 });
 
-// ============ TASK ROUTES ============
+app.delete('/api/events/:eventId', authMiddleware, (req, res) => {
+  const idx = db.events.findIndex((e) => e.id === req.params.eventId && e.userId === req.userId);
+  if (idx === -1) return res.status(404).json({ error: 'Not found' });
+  db.events.splice(idx, 1);
+  res.json({ success: true });
+});
 
+// ─── Tasks ────────────────────────────────────────────────────────────────────
 app.post('/api/tasks/assign', (req, res) => {
-  const { targetUserId, title, description, dueDate, priority, assignedBy } = req.body;
+  const { targetUsername, title, description, dueDate, priority, assignerName, urgent } = req.body;
+  if (!targetUsername || !title || !assignerName)
+    return res.status(400).json({ error: 'targetUsername, title, assignerName required' });
+  const user = db.users.find((u) => u.username === targetUsername.toLowerCase());
+  if (!user) return res.status(404).json({ error: 'User not found' });
 
-  const task = {
-    _id: String(taskIdCounter++),
-    userId: targetUserId,
-    title,
-    description: description || '',
-    dueDate: new Date(dueDate),
-    priority: priority || 'medium',
-    status: 'pending',
-    assignedBy: assignedBy || 'Anonymous',
-    source: 'external',
-    createdAt: new Date()
-  };
+  const task = { id: uuidv4(), userId: user.id, title, description: description || '', dueDate: dueDate || null, priority: priority || 'medium', assignerName, urgent: !!urgent, completed: false, createdAt: new Date().toISOString() };
+  db.tasks.push(task);
 
-  db.tasks.set(task._id, task);
+  pushNotification(user.id, {
+    id: uuidv4(), userId: user.id,
+    message: urgent ? `🚨 URGENT task from ${assignerName}: "${title}"` : `📋 New task from ${assignerName}: "${title}"`,
+    type: urgent ? 'urgent' : 'task',
+    taskId: task.id, read: false,
+    createdAt: new Date().toISOString(),
+  });
 
-  const targetSocket = userSockets.get(targetUserId);
-  if (targetSocket) {
-    io.to(targetSocket).emit('new-task', {
-      message: `New task assigned by ${task.assignedBy}`,
-      task
-    });
-  }
+  const socketId = userSockets.get(user.id);
+  if (socketId) io.to(socketId).emit('new-task', task);
 
-  const notification = {
-    _id: String(notificationIdCounter++),
-    userId: targetUserId,
-    type: 'task-assigned',
-    message: `${task.assignedBy} assigned you: ${title}`,
-    metadata: { taskId: task._id },
-    read: false,
-    createdAt: new Date()
-  };
-  db.notifications.set(notification._id, notification);
-
-  res.json({ success: true, taskId: task._id });
+  res.status(201).json({ task, message: 'Task assigned successfully' });
 });
 
-app.get('/api/tasks/:userId', (req, res) => {
-  const { userId } = req.params;
-  const userTasks = [];
-  
-  for (let task of db.tasks.values()) {
-    if (task.userId === userId) {
-      userTasks.push(task);
-    }
-  }
-  
-  res.json(userTasks.sort((a, b) => new Date(a.dueDate) - new Date(b.dueDate)));
+app.get('/api/tasks/:userId', authMiddleware, (req, res) => {
+  if (req.userId !== req.params.userId) return res.status(403).json({ error: 'Forbidden' });
+  res.json(db.tasks.filter((t) => t.userId === req.params.userId).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)));
 });
 
-app.patch('/api/tasks/:taskId', (req, res) => {
-  const { taskId } = req.params;
-  const updates = req.body;
-  
-  const task = db.tasks.get(taskId);
-  if (!task) {
-    return res.status(404).json({ error: 'Task not found' });
-  }
-  
-  Object.assign(task, updates);
+app.patch('/api/tasks/:taskId', authMiddleware, (req, res) => {
+  const task = db.tasks.find((t) => t.id === req.params.taskId && t.userId === req.userId);
+  if (!task) return res.status(404).json({ error: 'Not found' });
+  Object.assign(task, req.body);
   res.json(task);
 });
 
-// ============ NOTIFICATION ROUTES ============
-
-app.get('/api/notifications/:userId', (req, res) => {
-  const { userId } = req.params;
-  const userNotifs = [];
-  
-  for (let notif of db.notifications.values()) {
-    if (notif.userId === userId) {
-      userNotifs.push(notif);
-    }
-  }
-  
-  res.json(userNotifs.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)).slice(0, 50));
+// ─── Notifications ────────────────────────────────────────────────────────────
+app.get('/api/notifications/:userId', authMiddleware, (req, res) => {
+  if (req.userId !== req.params.userId) return res.status(403).json({ error: 'Forbidden' });
+  res.json(db.notifications.filter((n) => n.userId === req.params.userId).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)));
 });
 
-app.patch('/api/notifications/:id/read', (req, res) => {
-  const { id } = req.params;
-  const notif = db.notifications.get(id);
-  
-  if (notif) {
-    notif.read = true;
-    res.json({ success: true });
-  } else {
-    res.status(404).json({ error: 'Notification not found' });
-  }
+app.patch('/api/notifications/:id/read', authMiddleware, (req, res) => {
+  const notif = db.notifications.find((n) => n.id === req.params.id && n.userId === req.userId);
+  if (!notif) return res.status(404).json({ error: 'Not found' });
+  notif.read = true;
+  res.json(notif);
 });
 
-// ============ PUBLIC PROFILE ROUTES ============
+app.patch('/api/notifications/read-all/:userId', authMiddleware, (req, res) => {
+  if (req.userId !== req.params.userId) return res.status(403).json({ error: 'Forbidden' });
+  db.notifications.filter((n) => n.userId === req.params.userId).forEach((n) => (n.read = true));
+  res.json({ success: true });
+});
 
-app.get('/api/public/:username', (req, res) => {
-  const { username } = req.params;
-  
-  let user = null;
-  for (let u of db.users.values()) {
-    if (u.username === username) {
-      user = u;
-      break;
-    }
-  }
-  
-  if (!user) return res.status(404).json({ error: 'User not found' });
+// ─── Health ───────────────────────────────────────────────────────────────────
+app.get('/api/health', (_, res) => res.json({ status: 'ok', uptime: process.uptime() }));
 
-  const today = new Date();
-  const nextWeek = new Date(today.getTime() + 7 * 24 * 60 * 60 * 1000);
+// ─── SPA Fallback — serve index.html for all non-API routes ──────────────────
+app.get('*', (req, res) => {
+  res.sendFile(path.join(FRONTEND_DIST, 'index.html'));
+});
 
-  const upcomingEvents = [];
-  for (let event of db.events.values()) {
-    if (event.userId === user._id && event.isPublic) {
-      const eventStart = new Date(event.startTime);
-      if (eventStart >= today && eventStart <= nextWeek) {
-        upcomingEvents.push(event);
-      }
-    }
-  }
-
-  const currentEvent = upcomingEvents.find(e => {
-    const start = new Date(e.startTime);
-    const end = new Date(e.endTime);
-    return start <= today && end >= today;
+// ─── Socket.io ────────────────────────────────────────────────────────────────
+io.on('connection', (socket) => {
+  socket.on('register', (userId) => userSockets.set(userId, socket.id));
+  socket.on('urgent-request', ({ targetUserId, fromName, message }) => {
+    pushNotification(targetUserId, {
+      id: uuidv4(), userId: targetUserId,
+      message: `🚨 Urgent from ${fromName}: ${message}`,
+      type: 'urgent', read: false,
+      createdAt: new Date().toISOString(),
+    });
   });
-  
-  const currentStatus = currentEvent?.status || 'available';
-
-  res.json({
-    _id: user._id,
-    username: user.username,
-    displayName: user.displayName,
-    currentStatus,
-    upcomingAvailability: upcomingEvents.sort((a, b) => 
-      new Date(a.startTime) - new Date(b.startTime)
-    ),
-    allowExternalTasks: user.allowExternalTasks,
-    allowUrgentContact: user.allowUrgentContact
+  socket.on('disconnect', () => {
+    for (const [uid, sid] of userSockets.entries()) {
+      if (sid === socket.id) { userSockets.delete(uid); break; }
+    }
   });
 });
 
-// ============ HEALTH CHECK ============
-
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
-});
-
-const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`✅ Availability Manager running on port ${PORT}`);
 });
