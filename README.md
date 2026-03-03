@@ -1,171 +1,126 @@
-# Availability Manager - Collaborative Scheduling Platform
+# Availability Manager
 
-A full-stack collaborative scheduling platform with shared calendar views, external task assignment, urgency notifications, and real-time updates.
+Collaborative scheduling — share your calendar, receive tasks, get real-time notifications.
 
-## 🚀 Live Demo
+## 🚀 Deploy to Railway (5 minutes)
 
-**Frontend**: https://3ck4sz5qbeiug.ok.kimi.link
+Everything runs on a single Railway service. No Vercel, no separate servers.
 
-## ✨ Features
+### 1. Push to GitHub
 
-| Feature | Description |
-|---------|-------------|
-| **Shared Calendar View** | Others can see when you're free/busy via a public profile link |
-| **External Task Assignment** | Anyone with your link can add tasks to your calendar |
-| **Urgency Notifications** | Real-time alerts for high-priority requests via Socket.io |
-| **Cross-Device Access** | Session persistence with localStorage |
-| **Real-Time Updates** | Instant notifications when tasks are assigned |
+Create a new GitHub repository and push this entire folder as the root.
 
-## 📁 Project Structure
-
+Your repo should look like:
 ```
-/mnt/okcomputer/output/
-├── app/                    # React frontend (built)
-│   ├── dist/              # Production build
+/
+├── server.js
+├── package.json
+├── railway.toml
+├── frontend/
 │   ├── src/
-│   │   ├── App.tsx        # Main application
-│   │   ├── App.css        # Styles
-│   │   └── types/
-│   └── server/            # Backend server
-│       ├── server.js      # Express + Socket.io server
-│       ├── package.json
-│       └── .env
-└── server/                # Copy of backend (for convenience)
+│   ├── index.html
+│   ├── package.json
+│   └── vite.config.ts
+└── ...
 ```
 
-## 🛠️ Tech Stack
+### 2. Create a Railway project
 
-**Frontend:**
-- React + TypeScript + Vite
-- Tailwind CSS
-- react-big-calendar
-- date-fns
-- Socket.io-client
+1. Go to [railway.app](https://railway.app) → **Sign up with GitHub** (free)
+2. Click **"New Project" → "Deploy from GitHub repo"**
+3. Select your repository
+4. Railway auto-detects Node.js and uses `railway.toml`
 
-**Backend:**
-- Node.js + Express
-- Socket.io (real-time notifications)
-- In-memory data store (easily switch to MongoDB)
-- CORS enabled
+### 3. Set environment variables
 
-## 🚀 Running Locally
+In Railway → your service → **Variables** tab, add:
 
-### 1. Start the Backend Server
+| Variable | Value |
+|----------|-------|
+| `JWT_SECRET` | Any long random string (e.g. `xK9#mP2$qL7nR4wZ`) |
 
+That's it. `PORT` is set automatically by Railway.
+
+### 4. Deploy
+
+Railway builds and deploys automatically. Once done, click **"View Deployment"** to get your live URL:
+
+```
+https://availability-manager-production.railway.app
+```
+
+**Your app is live.** Share `https://your-url.railway.app?user=yourusername` with anyone.
+
+---
+
+## 🖥️ Local Development
+
+Run the backend and frontend separately:
+
+**Terminal 1 — Backend:**
 ```bash
-cd /mnt/okcomputer/output/server
 npm install
-npm start
+node server.js
+# Runs on http://localhost:3001
 ```
 
-The server will run on `http://localhost:3001`
-
-### 2. Start the Frontend (Development)
-
+**Terminal 2 — Frontend:**
 ```bash
-cd /mnt/okcomputer/output/app
+cd frontend
 npm install
 npm run dev
+# Runs on http://localhost:5173
+# API calls are proxied to :3001 automatically
 ```
 
-The frontend will run on `http://localhost:5173`
+---
 
-### 3. Configure Environment
+## How it works (Railway)
 
-Update `/mnt/okcomputer/output/app/.env`:
-```
-VITE_API_URL=http://localhost:3001
-```
+Railway runs ONE service:
+1. `npm install` installs backend dependencies
+2. `npm run build` → goes into `frontend/`, installs, runs `vite build` → outputs to `frontend/dist/`
+3. `npm start` → starts Express, which serves `frontend/dist/` as static files AND handles all `/api/*` routes
 
-## 📡 API Endpoints
+No separate frontend hosting needed.
 
-### Authentication
-- `POST /api/register` - Create new account
-- `POST /api/login` - Sign in
+---
 
-### Calendar
-- `GET /api/calendar/:userId` - Get user's public availability
-- `POST /api/events` - Create calendar event
-- `GET /api/events/:userId` - Get all user events
+## Features
 
-### Tasks
-- `POST /api/tasks/assign` - Assign task to user (external)
-- `GET /api/tasks/:userId` - Get user's tasks
-- `PATCH /api/tasks/:taskId` - Update task status
+- 🔐 Register / login with JWT sessions
+- 📅 Interactive calendar (month/week/day) — click to create events
+- 🔗 Shareable public profile: `?user=yourusername`
+- 📋 Anyone with your link can assign tasks to you
+- 🔔 Real-time notifications via Socket.io
+- 🚨 Urgent task alerts
 
-### Notifications
-- `GET /api/notifications/:userId` - Get notifications
-- `PATCH /api/notifications/:id/read` - Mark as read
+---
 
-### Public Profile
-- `GET /api/public/:username` - Get public profile data
+## ⚠️ Data Persistence
 
-## 🔌 Socket.io Events
+The backend uses **in-memory storage** — data resets when Railway restarts the service.
 
-**Client → Server:**
-- `register` - Register user ID with socket
-- `urgent-request` - Send urgent notification
+For persistent data, add a Railway PostgreSQL database:
+1. In Railway: **New → Database → PostgreSQL**
+2. Replace the `db` object in `server.js` with `pg` queries
 
-**Server → Client:**
-- `new-notification` - New notification received
-- `new-task` - New task assigned
+---
 
-## 🎯 Usage Flow
+## API Reference
 
-1. **Register/Login** - Create an account or sign in
-2. **View Calendar** - See your schedule and add events
-3. **Share Your Link** - Copy your shareable link from Settings
-4. **Others Can:**
-   - View your public availability
-   - Add tasks to your calendar
-   - Send urgent notifications (if enabled)
-5. **Receive Tasks** - Get real-time notifications when tasks are assigned
-
-## 📝 Switching to MongoDB
-
-To use MongoDB instead of in-memory storage:
-
-1. Install dependencies:
-```bash
-npm install mongoose
-```
-
-2. Update `server.js`:
-```javascript
-const mongoose = require('mongoose');
-mongoose.connect(process.env.MONGODB_URI);
-```
-
-3. Create models (see original specification for schema)
-
-## 🚀 Deployment
-
-### Frontend (Static)
-The frontend is already deployed at: https://3ck4sz5qbeiug.ok.kimi.link
-
-### Backend (Node.js)
-Deploy to Railway, Render, or Heroku:
-
-```bash
-# Railway
-railway login
-railway init
-railway up
-
-# Set environment variables:
-# PORT=3001
-# MONGODB_URI=your_mongodb_uri (optional)
-```
-
-## 🔮 Future Enhancements
-
-- [ ] Email notifications for offline users
-- [ ] Recurring events support
-- [ ] Google/Outlook calendar sync
-- [ ] Time zone handling
-- [ ] Team/group calendars
-- [ ] Mobile app (React Native)
-
-## 📄 License
-
-MIT
+| Method | Endpoint | Auth | Description |
+|--------|----------|------|-------------|
+| POST | `/api/register` | — | Create account |
+| POST | `/api/login` | — | Sign in |
+| GET | `/api/me` | ✅ | Current user |
+| GET | `/api/public/:username` | — | Public profile |
+| GET | `/api/calendar/:userId` | ✅ | Events |
+| POST | `/api/events` | ✅ | Create event |
+| DELETE | `/api/events/:id` | ✅ | Delete event |
+| POST | `/api/tasks/assign` | — | Assign task |
+| GET | `/api/tasks/:userId` | ✅ | Get tasks |
+| PATCH | `/api/tasks/:taskId` | ✅ | Update task |
+| GET | `/api/notifications/:userId` | ✅ | Notifications |
+| PATCH | `/api/notifications/:id/read` | ✅ | Mark read |
+| GET | `/api/health` | — | Health check |
